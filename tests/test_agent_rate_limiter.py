@@ -117,6 +117,17 @@ def test_retry_after_is_positive():
     assert exc_info.value.retry_after_seconds > 0
 
 
+def test_retry_after_exact_value():
+    """retry_after equals the time until the oldest entry leaves the window."""
+    clock, advance = make_clock(start=0.0)
+    lim = RateLimiter(max_calls=1, window_seconds=30.0, clock=clock)
+    lim.acquire()  # oldest entry at t=0
+    advance(10.0)  # t=10; oldest (t=0) expires once now reaches t=30
+    with pytest.raises(RateLimitError) as exc_info:
+        lim.acquire()
+    assert exc_info.value.retry_after_seconds == pytest.approx(20.0)
+
+
 def test_retry_after_decreases_with_time():
     clock, advance = make_clock(start=0.0)
     lim = RateLimiter(max_calls=1, window_seconds=30.0, clock=clock)
@@ -347,6 +358,20 @@ def test_decorator_propagates_exception():
         fail()
 
 
+def test_decorator_exposed_limiter_reset_restores_capacity():
+    clock, _ = make_clock()
+
+    @rate_limited(max_calls=1, window_seconds=60.0, clock=clock)
+    def fn() -> str:
+        return "ok"
+
+    assert fn() == "ok"
+    with pytest.raises(RateLimitError):
+        fn()
+    fn._rate_limiter.reset()
+    assert fn() == "ok"  # capacity restored after reset
+
+
 # ---------------------------------------------------------------------------
 # RateLimitRegistry
 # ---------------------------------------------------------------------------
@@ -365,6 +390,35 @@ def test_registry_wrap_applies_limit():
     wrapped("hello")
     with pytest.raises(RateLimitError):
         wrapped("world")
+
+
+def test_registry_wrap_uses_function_name_when_no_tool_name():
+    """wrap() without an explicit tool_name resolves the limiter via fn.__name__."""
+    clock, _ = make_clock()
+
+    def search(q: str) -> str:
+        return q
+
+    reg = RateLimitRegistry(clock=clock)
+    reg.add("search", max_calls=1, window_seconds=60.0)
+    wrapped = reg.wrap(search)  # no tool_name -> keyed off "search"
+
+    assert wrapped("hello") == "hello"
+    with pytest.raises(RateLimitError):
+        wrapped("world")
+
+
+def test_registry_wrap_preserves_metadata():
+    reg = RateLimitRegistry()
+    reg.add("my_tool", max_calls=5, window_seconds=60.0)
+
+    def my_tool(x: int) -> int:
+        """Docstring."""
+        return x
+
+    wrapped = reg.wrap(my_tool)
+    assert wrapped.__name__ == "my_tool"
+    assert wrapped.__doc__ == "Docstring."
 
 
 def test_registry_wrap_passthrough_if_not_registered():
